@@ -1,0 +1,13 @@
+accelerate 
+transformers 
+trl 
+datasets 
+bitsandbytes 
+peft 
+tensorboard
+torch
+scikit-learn
+pandas
+numpy
+lightfm
+pyspark
