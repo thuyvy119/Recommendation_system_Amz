@@ -17,7 +17,13 @@ from transformers import pipeline
 from transformers import AutoTokenizer, AutoModel
 import torch
 
-spark = (SparkSession.builder.master("local[*]").appName("AmazonReviews").getOrCreate())
+spark = (SparkSession.builder
+         .master("local[*]")
+         .appName("AmazonReviews")
+         .config("spark.driver.memory", "7g")  
+         .config("spark.executor.memory", "7g")  
+         .config("spark.executor.instances", "2") 
+         .getOrCreate())
 
 # check spark session is correctly initialized
 if spark is None:
@@ -29,18 +35,42 @@ metadata_filepath = './data/meta_Gift_Cards.jsonl'
 reviews_df = spark.read.json(review_filepath)
 metadata_df = spark.read.json(metadata_filepath)
 
-reviews_df = reviews_df.repartition(10)
-metadata_df = metadata_df.repartition(10)
-
 print(reviews_df.select("parent_asin").distinct().count())
 print(metadata_df.select("parent_asin").distinct().count())
+
+# sample a fraction of the reviews for each parent_asin
+fraction = 0.1  
+fractions = {row['parent_asin']: fraction for row in reviews_df.select("parent_asin").distinct().collect()}
+reviews_df = reviews_df.stat.sampleBy("parent_asin", fractions, seed=42)
+
+print(f"Reviews DataFrame shape after sampling: {reviews_df.count()} rows, {len(reviews_df.columns)} columns")
+
+# identify distinct parent_asin values in the sampled reviews_df
+sampled_asins = reviews_df.select("parent_asin").distinct()
+
+# filter metadata_df to include only the sampled parent_asin values
+metadata_df = metadata_df.join(sampled_asins, on="parent_asin", how="inner")
+
+print(f"Metadata DataFrame shape after filtering: {metadata_df.count()} rows, {len(metadata_df.columns)} columns")
+
+print(f"Distinct parent_asin in reviews_df: {reviews_df.select('parent_asin').distinct().count()}")
+print(f"Distinct parent_asin in metadata_df: {metadata_df.select('parent_asin').distinct().count()}")
+
+# ensure all parent_asin from metadata are in the sampled reviews
+distinct_parent_asin_reviews= reviews_df.select('parent_asin').distinct().count()
+distinct_parent_asin_metadata= metadata_df.select('parent_asin').distinct().count()
+
+assert distinct_parent_asin_reviews == distinct_parent_asin_metadata, "The number of distinct parent_asin values in reviews_df must equal that in metadata_df."
 
 # fill NaN values with 0
 reviews_df = reviews_df.fillna(0)
 metadata_df = metadata_df.fillna(0)
 
-# reviews_df.printSchema()
-# metadata_df.printSchema()
+reviews_df.printSchema()
+metadata_df.printSchema()
+
+reviews_df = reviews_df.repartition(10)
+metadata_df = metadata_df.repartition(10)
 
 # cache
 reviews_df.cache()
@@ -52,7 +82,7 @@ reviews_df = reviews_df.withColumn("timestamp", from_unixtime(col("timestamp") /
 # extract temporal features
 reviews_df = reviews_df.withColumn("day_of_week", dayofweek(col("timestamp")))
 reviews_df = reviews_df.withColumn("month", month(col("timestamp")))
-reviews_df = reviews_df.withColumn("hour", hour(col("timestamp")))
+# reviews_df = reviews_df.withColumn("hour", hour(col("timestamp")))
 
 # drop video, img columns
 metadata_df = metadata_df.drop('video', 'image')
@@ -61,14 +91,14 @@ metadata_df = metadata_df.drop('video', 'image')
 tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen1.5-0.5B')
 model = AutoModel.from_pretrained('Qwen/Qwen1.5-0.5B')
 
-def generate_embeddings_udf(texts):
+def generate_embeddings(texts):
     inputs = tokenizer(texts, return_tensors='pt', padding=True, truncation=True)
     with torch.no_grad():
         outputs = model(**inputs)
     embeddings = outputs.last_hidden_state.mean(dim=1).numpy().tolist()
     return embeddings
 
-generate_embeddings_udf = udf(lambda x: generate_embeddings_udf(x), ArrayType(DoubleType()))
+generate_embeddings_udf = udf(lambda x: generate_embeddings(x), ArrayType(DoubleType()))
 
 # generate embeddings for textual features
 reviews_df = reviews_df.withColumn("text_embedding", generate_embeddings_udf(col("text")))
@@ -123,7 +153,7 @@ df = df.withColumn("similarity_score", array_to_vector_udf(col("similarity_score
 
 # combining features into a final feature set
 features = ['user_id_encoded', 'asin_encoded', 'rating', 'verified_purchase', 
-            'helpful_vote', 'day_of_week', 'month', 'hour', 'sentiment_score', 'similarity_score']
+            'helpful_vote', 'day_of_week', 'month', 'sentiment_score', 'similarity_score']
 embeddings = ['text_embedding', 'title_embedding', 'features_embedding', 'description_embedding', 'details_embedding']
 
 # split into features and targets
