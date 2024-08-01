@@ -11,3 +11,7 @@ pandas
 numpy
 lightfm
 pyspark
+langchain
+chromadb
+sentence-transformers
+
